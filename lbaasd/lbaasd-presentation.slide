@@ -1,0 +1,241 @@
+lbaasd + cidrd
+Automated load balancer VIP management for Kubernetes
+Tags: kubernetes, lbaasd, cidrd, revinate
+
+Chris Snell
+Revinate, Inc.
+chris.snell@revinate.com
+@chrissnell
+http://output.chrissnell.com
+
+* Genesis
+
+The Miserable State of Deployment at Revinate
+
+- App deployment is a multi-day process
+- Involves three teams at two companies
+- Frustrating for devs
+- Time-consuming for Ops team
+- Not self-healing
+
+* The Deployment Anti-Pattern
+
+First, the dev:
+
+- Builds Chef cookbook for their app
+- Provisions instances in OpenStack (--hint different_host=<...>)
+- Chef bootstrap
+- File JIRA with TechOps team to request VIP
+
+Then, TechOps team:
+
+- Requests VIP from hosting provider via ticket in web portal
+- Calls hosting provider to escalate ticket (typical call: 30 minutes)
+- Responds to dev in JIRA
+
+* It takes forever.
+
+* Enter: Kubernetes
+
+* Kubernetes
+
+.image images/kubernetes-logo.png _ 300
+
+- Fast and easy app cluster deployment
+- Docker containers
+- Auto-healing
+- Dev-friendly
+- Ops-friendly
+
+* But what about load balancers?
+
+It's easy...if you run in public cloud
+
+- CloudProvider interface has easy integration with GCE and AWS
+
+* CloudProvider Load Balancers
+
+    "kind": "Service",
+    [...]
+    "spec": {
+    [...]
+        "ports": [
+            {
+                "protocol": "TCP",
+                "port": 80,
+                "targetPort": 9376,
+                "nodePort": 30061
+            }
+        ],
+        "clusterIP": "10.0.171.239",
+        "type": "LoadBalancer"
+    },
+    "status": {
+        "loadBalancer": {
+            "ingress": [
+                {
+                    "ip": "146.148.47.155"
+                }
+            ]
+        }
+    }
+}
+
+* Meanwhile, in the Private Cloud...
+
+* Private Cloud Ingress
+
+You have two options:
+
+- Send traffic directly to the pods 
+- ...but only if you're on the overlay network
+
+- Send traffic to NodePort
+- ...and endure the funky, dynamic port assignments
+
+* NodePort
+
+An option for getting traffic to Kubernetes services
+
+- Every Kubernetes server listens on every assigned NodePort
+- Traffic automatically routed to the Service (and onward, to a Pod)
+- Node ports are assigned by Kubernetes
+- Typically high ports (e.g. 32965/tcp)
+- Totally not convenient
+- But...it just works
+
+* We need a way to use a real load balancer
+
+* F5 LTM
+.image images/f5.jpg _ 500
+
+- It's damned fast
+- It's scalable
+- SSL offloading
+- Fancy scriptable routing with iRules
+- iControl REST API
+
+* The Secret Sauce
+
+* Connect F5 LTM to Kubernetes NodePorts
+
+Need a way to point F5 VIPs at pools of Kubernetes Nodes
+
+We need to make it easy:
+
+- LB pools automatically update when nodes go offline
+- Devs need to be able to create VIPs without help
+- Integrate with Kubernetes and F5 APIs 
+
+We need to make it scalable:
+
+- Traffic is spread evenly across large clusters
+- No reliance on relational DBs
+
+* lbaasd
+
+* lbaasd
+
+Automatic VIP management for Kubernetes
+
+Written in Go using `k8s.io/kubernetes/pkg/client/cache`
+
+1. Dev creates K8S Service
+
+2. Dev creates VIP in `lbaasctl`, associating it with K8S Service
+
+3. `lbaasd` pulls down Service object from K8S API
+
+4. `lbaasd` creates VIP on F5 through API
+
+5. `lbaasd` watches K8S nodes and updates VIP pools as K8S Nodes go offline
+
+* How do we maintain state?
+
+* Some state is easy to maintain
+
+- Infrequently-accessed state is obtained through APIs
+- ...or stored in `etcd`
+- Examples: NodePort #, VIP front-end protocol type
+
+* Other state is more complicated
+
+LB pool membership
+
+- Lots of pools
+
+- Lots of Nodes
+
+- Frequently changing
+
+- Every app uses a different pool of Nodes
+
+* Solution: Don't maintain state for pools
+
+Deterministic pool membership selection
+
+- Every VIP gets its own deterministic set of backend pool members
+
+- `lbaasd` auto-generates this set upon startup
+
+- The set will always be the same (unless Nodes fail)
+
+* How we do it:
+
+Every Kubernetes Service and Node object has its own UUID
+
+Example:
+
+- Node:  `f5d9289a-500c-11e5-928c-fa163eaaa9b0`
+
+- Service:   `85fa372a-3583-11e5-99c5-fa163e386a90`
+
+The game:
+
+1. Feed Service UUID as a seed to a `rand.Rand` PRNG
+2. Generate a number in the range 0x000 - 0xFFF (0-4095)
+3. Search list of Nodes for a Node w/ UUID beginning with number generated in Step 2
+4. If none found, go to Step 2
+5. When random number matches a Node UUID, add that node to the pool
+6. Repeat until you have enough nodes
+
+* Load Balancer IP Assignments
+
+- Traditionally, a manual process.
+
+- We needed a way to automate this.
+
+- Devs should be able to request a "class" of IP space for their VIP (e.g. "public", "private")
+
+* Enter cidrd
+
+* cidrd
+
+A RESTful IP allocation service
+
+- Ops team creates classes of IPs
+- Assigns blocks of IP space to "classes"
+- `lbaasd` requests an IP and gets a lease
+- `lbaasd` updates lease periodically ("I'm still using it!")
+- Expired leases are culled
+
+* cidrd (continued)
+- Twelve-factor app (http://12factor.net)
+- Uses `etcd` for IP allocation storage
+- HA - Multiple instances are run under Kubernetes as a Service
+- Scalable: multiple instances can serve allocation requests simultaneously
+
+* Future goal: a cidrd-enabled DHCP server
+
+- Used to PXE boot CoreOS on bare metal
+
+- Automated cloud-config generation for CoreOS w/ TFTP delivery
+
+- Web front-end for quick processing of new hardware and lease discovery (barcoded MAC addresses?)
+
+* lbaasd - Current Status
+
+- In active development
+- Aiming for a 2015Q4 release
+
+* Questions?
